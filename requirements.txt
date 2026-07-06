@@ -1,0 +1,19 @@
+# ── Core GUI + 3D ────────────────────────────────────────────────
+PyQt6>=6.4.0
+pyqtgraph>=0.13.0
+PyOpenGL>=3.1.0
+numpy>=1.24.0
+
+# ── Robot: G-code over serial (COM port) ─────────────────────────
+pyserial>=3.5
+
+# ── VIVE Tracker via SteamVR / OpenVR ────────────────────────────
+openvr>=1.26.0
+
+# ── Optional ─────────────────────────────────────────────────────
+# FAIRINO robot control over TCP/IP. Not on PyPI — install the SDK that ships
+# with your FAIRINO controller / FAIRINO_SimMachine on the robot laptop:
+#   fairino
+#
+# Packaging to a standalone .exe:
+# pyinstaller>=5.0
