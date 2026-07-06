@@ -15,5 +15,10 @@ openvr>=1.26.0
 # with your FAIRINO controller / FAIRINO_SimMachine on the robot laptop:
 #   fairino
 #
+# Dev-only: regenerate the bundled VIVE Tracker mesh from the official STEP CAD
+# (tools/convert_step_to_stl.py). NOT needed at runtime — the meshed STL is
+# already bundled in robotplay/assets/.
+#   gmsh
+#
 # Packaging to a standalone .exe:
 # pyinstaller>=5.0

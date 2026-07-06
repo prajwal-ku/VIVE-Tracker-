@@ -22,6 +22,7 @@ from PyQt6.QtCore import QTimer
 
 from ..config import CONFIG
 from ..core.models import TrackerData
+from .tracker_model import TrackerModel
 
 
 class Viewport3D(gl.GLViewWidget):
@@ -35,9 +36,14 @@ class Viewport3D(gl.GLViewWidget):
                                azimuth=self._cfg.cam_azimuth)
 
         self._label_items: list[gl.GLTextItem] = []
+        self._model_offset = np.eye(3)   # display-only CAD alignment (calibration)
 
         self._build_static_scene()
         self._build_dynamic_items()
+
+    def set_model_offset(self, R: np.ndarray) -> None:
+        """Display-only rotation aligning the CAD mesh to the physical tracker."""
+        self._model_offset = np.asarray(R, dtype=float)
 
     # ── static scene: grid + axes ───────────────────────────────
     def _build_static_scene(self) -> None:
@@ -62,13 +68,11 @@ class Viewport3D(gl.GLViewWidget):
 
     # ── dynamic items ───────────────────────────────────────────
     def _build_dynamic_items(self) -> None:
-        # Live tracker marker (starts hidden until a valid pose arrives)
-        self._tracker = gl.GLScatterPlotItem(
-            pos=np.array([[0.0, 0.0, -999.0]]),
-            color=self._pal.tracker_rgba, size=self._cfg.tracker_size, pxMode=True)
-        self.addItem(self._tracker)
+        # Live tracker — the real VIVE Tracker CAD model that follows the pose
+        # (light material so it stands out against the dark workspace).
+        self._model = TrackerModel(self, body=(0.82, 0.86, 0.94, 1.0))
 
-        # Orientation triad (3 body axes as line pairs)
+        # Orientation triad (3 body axes as line pairs), overlaid on the model.
         self._triad = gl.GLLinePlotItem(pos=np.zeros((6, 3)),
                                         color=np.ones((6, 4)),
                                         width=3, antialias=True, mode="lines")
@@ -92,11 +96,10 @@ class Viewport3D(gl.GLViewWidget):
             size=self._cfg.waypoint_size, pxMode=True)
         self.addItem(self._waypoints)
 
-        # Playback ghost (magenta) — hidden until playing
-        self._ghost = gl.GLScatterPlotItem(
-            pos=np.array([[0.0, 0.0, -999.0]]), color=self._pal.playback_rgba,
-            size=self._cfg.tracker_size + 6, pxMode=True)
-        self.addItem(self._ghost)
+        # Playback ghost — a translucent magenta tracker model, hidden until playing
+        self._ghost = TrackerModel(
+            self, body=self._pal.playback_rgba[:3] + (1.0,),
+            accent=self._pal.playback_rgba[:3] + (1.0,), ghost=True)
 
         # Highlight ring for the current playback waypoint
         self._highlight = gl.GLScatterPlotItem(
@@ -107,14 +110,14 @@ class Viewport3D(gl.GLViewWidget):
     # ── live updates (called every render frame) ────────────────
     def update_tracker(self, pose: TrackerData, valid: bool = True) -> None:
         if not valid:
-            # No tracking signal — hide the marker and orientation triad.
-            self._tracker.setData(pos=np.array([[0.0, 0.0, -999.0]]))
+            # No tracking signal — hide the tracker model and orientation triad.
+            self._model.set_visible(False)
             self._triad.setData(pos=np.zeros((6, 3)), color=np.zeros((6, 4)))
             return
-        p = pose.position
-        self._tracker.setData(pos=np.array([p]),
-                             color=self._pal.tracker_rgba,
-                             size=self._cfg.tracker_size)
+        self._model.set_visible(True)
+        # The triad shows the true tracker frame; the CAD gets the display offset.
+        R = pose.rotation_matrix
+        self._model.set_pose(pose.position, R @ self._model_offset)
         self._triad.setData(pos=self._triad_points(pose),
                             color=self._triad_colors())
 
@@ -172,9 +175,11 @@ class Viewport3D(gl.GLViewWidget):
     # ── playback visuals ────────────────────────────────────────
     def set_ghost(self, pose: TrackerData | None) -> None:
         if pose is None:
-            self._ghost.setData(pos=np.array([[0.0, 0.0, -999.0]]))
+            self._ghost.set_visible(False)
         else:
-            self._ghost.setData(pos=np.array([pose.position]))
+            self._ghost.set_visible(True)
+            self._ghost.set_pose(pose.position,
+                                 pose.rotation_matrix @ self._model_offset)
 
     def set_highlight(self, position: np.ndarray | None) -> None:
         if position is None:
@@ -183,8 +188,5 @@ class Viewport3D(gl.GLViewWidget):
             self._highlight.setData(pos=np.array([position]))
 
     def flash_tracker(self) -> None:
-        """Brief gold flash when a waypoint is captured."""
-        self._tracker.setData(color=(1.0, 0.9, 0.0, 1.0),
-                              size=self._cfg.tracker_size + 8)
-        QTimer.singleShot(180, lambda: self._tracker.setData(
-            color=self._pal.tracker_rgba, size=self._cfg.tracker_size))
+        """Brief gold flash of the tracker model when a waypoint is captured."""
+        self._model.flash()

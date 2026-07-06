@@ -45,6 +45,16 @@ class ViveTracker(TrackerInterface):
         self._pose = TrackerData(0.0, 0.0, 0.5)
         self._pose_lock = threading.Lock()
 
+        # Calibration: raw OpenVR pose → accurate scene pose. Shared with the UI
+        # so "Set Zero" and model-alignment controls act on the live pipeline.
+        from ..core.calibration import Calibration
+        self.calibration = Calibration(
+            world_conversion=CONFIG.calibration.world_conversion,
+            model_offset_euler=CONFIG.calibration.model_offset_euler,
+            axis_flip=CONFIG.calibration.axis_flip)
+        self._raw_pos = np.zeros(3)
+        self._raw_R = np.eye(3)
+
         cfg = CONFIG.buttons
         self._record_mask = cfg.record_bitmask
         self._play_mask = cfg.play_bitmask
@@ -63,7 +73,9 @@ class ViveTracker(TrackerInterface):
             self._connected = True
             self._find_tracker()
             if self._tracker_index is None:
-                return False, "SteamVR running but no tracker found — power it on"
+                # SteamVR session is open; keep it and let the status poll pick up
+                # the tracker as soon as it is powered on (real-world workflow).
+                return True, "SteamVR connected — waiting for tracker (power it on)"
             return True, f"VIVE Tracker connected (device {self._tracker_index})"
         except Exception as e:
             self._connected = False
@@ -123,17 +135,28 @@ class ViveTracker(TrackerInterface):
                 if p.bPoseIsValid:
                     m = p.mDeviceToAbsoluteTracking
                     # OpenVR row-major 3x4: position is the 4th column.
-                    x, y, z = m[0][3], m[1][3], m[2][3]
-                    R = np.array([[m[0][0], m[0][1], m[0][2]],
-                                  [m[1][0], m[1][1], m[1][2]],
-                                  [m[2][0], m[2][1], m[2][2]]])
-                    pose = TrackerData.from_matrix(x, y, z, R)
+                    pos_vr = np.array([m[0][3], m[1][3], m[2][3]])
+                    R_vr = np.array([[m[0][0], m[0][1], m[0][2]],
+                                     [m[1][0], m[1][1], m[1][2]],
+                                     [m[2][0], m[2][1], m[2][2]]])
+                    # Keep the raw pose for "Set Zero"; report the calibrated one.
+                    self._raw_pos, self._raw_R = pos_vr, R_vr
+                    pos, R = self.calibration.to_scene(pos_vr, R_vr)
+                    pose = TrackerData.from_matrix(pos[0], pos[1], pos[2], R)
                     with self._pose_lock:
                         self._pose = pose
         except Exception:
             pass  # keep last good pose; status polling will flag the drop
         with self._pose_lock:
             return self._pose.copy()
+
+    # ── calibration control ─────────────────────────────────────
+    def calibrate_zero(self) -> None:
+        """Capture the current raw pose as the workspace origin/orientation."""
+        self.calibration.set_reference(self._raw_pos, self._raw_R)
+
+    def clear_calibration(self) -> None:
+        self.calibration.clear_reference()
 
     # ── physical buttons ────────────────────────────────────────
     def poll_buttons(self) -> ButtonEvents:

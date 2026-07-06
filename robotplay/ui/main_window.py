@@ -27,7 +27,7 @@ from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
     QGroupBox, QPushButton, QLabel, QTextEdit, QScrollArea, QFrame,
-    QFileDialog, QMessageBox, QStatusBar, QSizePolicy,
+    QFileDialog, QMessageBox, QStatusBar, QSizePolicy, QSpinBox, QGridLayout,
 )
 
 from ..config import CONFIG
@@ -158,6 +158,7 @@ class MainWindow(QMainWindow):
         v.setSpacing(8)
 
         v.addWidget(self._build_tracker_group())
+        v.addWidget(self._build_calibration_group())
         self.status_panel = ConnectionStatusPanel()
         v.addWidget(self.status_panel)
         self.pose_panel = LivePosePanel()
@@ -185,6 +186,70 @@ class MainWindow(QMainWindow):
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         v.addWidget(hint)
+        return g
+
+    def _build_calibration_group(self) -> QGroupBox:
+        g = QGroupBox("Calibration")
+        v = QVBoxLayout(g)
+        v.setSpacing(6)
+
+        info = QLabel("Hold the tracker in the pose you want as HOME, then lock — "
+                      "the UI axes adopt the tracker's own frame.")
+        info.setObjectName("hint")
+        info.setWordWrap(True)
+        v.addWidget(info)
+
+        row = QHBoxLayout()
+        btn_zero = QPushButton("🔒  Calibrate · Lock Pose")
+        btn_zero.setObjectName("btn_play")
+        btn_zero.setToolTip("Adopt the tracker's CURRENT pose as the UI coordinate "
+                            "frame.\nModel snaps to home; everything then moves "
+                            "relative to this locked frame.")
+        btn_zero.clicked.connect(self._calibrate_zero)
+        btn_clear = QPushButton("Unlock")
+        btn_clear.setMaximumWidth(96)
+        btn_clear.setToolTip("Release the lock (back to the default room view).")
+        btn_clear.clicked.connect(self._calibrate_clear)
+        row.addWidget(btn_zero, 1)
+        row.addWidget(btn_clear, 0)
+        v.addLayout(row)
+
+        self._calib_state = QLabel("Frame: default (not locked)")
+        self._calib_state.setObjectName("hint")
+        v.addWidget(self._calib_state)
+
+        lbl = QLabel("Model alignment — rotate the CAD to match the real tracker:")
+        lbl.setObjectName("hint")
+        lbl.setWordWrap(True)
+        v.addWidget(lbl)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(6)
+        self._align_spins: dict[str, QSpinBox] = {}
+        euler = CONFIG.calibration.model_offset_euler
+        for i, (name, val) in enumerate(zip(("Roll", "Pitch", "Yaw"), euler)):
+            grid.addWidget(QLabel(name), 0, i)
+            sb = QSpinBox()
+            sb.setRange(-180, 180)
+            sb.setSingleStep(5)
+            sb.setWrapping(True)
+            sb.setSuffix("°")
+            sb.setMaximumWidth(78)
+            sb.blockSignals(True)
+            sb.setValue(int(val))
+            sb.blockSignals(False)
+            sb.valueChanged.connect(self._update_model_alignment)
+            grid.addWidget(sb, 1, i)
+            self._align_spins[name] = sb
+        v.addLayout(grid)
+
+        row2 = QHBoxLayout()
+        for label, axis in (("+90 X", "Roll"), ("+90 Y", "Pitch"), ("+90 Z", "Yaw")):
+            b = QPushButton(label)
+            b.setToolTip(f"Add 90° to {axis} — quick way to snap the model.")
+            b.clicked.connect(lambda _=False, a=axis: self._nudge_alignment(a, 90))
+            row2.addWidget(b)
+        v.addLayout(row2)
         return g
 
     def _build_controls_group(self) -> QGroupBox:
@@ -300,6 +365,9 @@ class MainWindow(QMainWindow):
         # Initialise robot panel state for the default backend.
         self._on_backend_changed(RobotBackend.SERIAL_GCODE)
 
+        # Sync the CAD display offset from the calibration defaults.
+        self.viewport.set_model_offset(self._vive.calibration.model_R)
+
     # ══════════════════════════════════════════════════════════════
     #  Timers
     # ══════════════════════════════════════════════════════════════
@@ -382,6 +450,38 @@ class MainWindow(QMainWindow):
             self._btn_conn_tracker.setText("Connect Tracker")
             self.logger.error(f"VIVE connect failed: {msg}")
             self.status_msg.emit(f"Tracker not connected: {msg}")
+
+    # ── calibration ─────────────────────────────────────────────
+    def _calibrate_zero(self) -> None:
+        if not (self._vive.is_connected() and self._tracker_ok):
+            self._warn("No tracker signal — cannot calibrate")
+            return
+        self._vive.calibrate_zero()
+        self._calib_state.setText("Frame: LOCKED to tracker")
+        self._calib_state.setStyleSheet(f"color:{CONFIG.palette.ok};")
+        self.logger.event("Frame locked — UI adopted the tracker's current pose")
+        self.status_msg.emit("Calibrated — UI frame locked to the tracker")
+
+    def _calibrate_clear(self) -> None:
+        self._vive.clear_calibration()
+        self._calib_state.setText("Frame: default (not locked)")
+        self._calib_state.setStyleSheet(f"color:{CONFIG.palette.text_dim};")
+        self.logger.info("Frame unlocked — back to the default view")
+        self.status_msg.emit("Calibration released")
+
+    def _update_model_alignment(self, *_args) -> None:
+        r = self._align_spins["Roll"].value()
+        p = self._align_spins["Pitch"].value()
+        y = self._align_spins["Yaw"].value()
+        self._vive.calibration.set_model_offset_euler(r, p, y)
+        self.viewport.set_model_offset(self._vive.calibration.model_R)
+        self.status_msg.emit(f"Model alignment: R{r}° P{p}° Y{y}°")
+
+    def _nudge_alignment(self, axis: str, delta: int) -> None:
+        sb = self._align_spins[axis]
+        new = sb.value() + delta
+        new = ((new + 180) % 360) - 180   # wrap to [-180, 180]
+        sb.setValue(new)                  # triggers _update_model_alignment
 
     def _disconnect_tracker(self) -> None:
         self._vive.disconnect()

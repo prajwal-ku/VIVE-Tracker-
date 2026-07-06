@@ -50,16 +50,22 @@ class Palette:
 
 @dataclass(frozen=True)
 class SceneConfig:
-    workspace_size:   float = 3.0    # metres, full width of the ground grid
-    grid_spacing:     float = 0.25   # metres between grid lines
-    axis_length:      float = 1.5    # metres, length of world XYZ axes
-    triad_length:     float = 0.12   # metres, length of the tracker orientation triad
-    cam_distance:     float = 4.0
-    cam_elevation:    float = 28.0
+    workspace_size:   float = 2.0    # metres, full width of the ground grid
+    grid_spacing:     float = 0.20   # metres between grid lines
+    axis_length:      float = 0.65   # metres, length of world XYZ axes
+    triad_length:     float = 0.16   # metres, length of the tracker orientation triad
+    cam_distance:     float = 1.9
+    cam_elevation:    float = 26.0
     cam_azimuth:      float = 45.0
     waypoint_size:    float = 18.0   # px marker size
     tracker_size:     float = 15.0
     workspace_limit:  float = 1.5    # metres, +/- clamp for the simulated tracker
+
+    # Live 3D tracker model (the CAD-like VIVE Tracker that follows the pose)
+    tracker_model_scale: float = 2.0   # visual size multiplier for the puck model
+    tracker_model_size:  float = 0.16  # metres, target bounding size when an STL is used
+    tracker_stl_path:    str = ""      # optional path to a real VIVE Tracker CAD
+                                       # STL; empty → procedural model is built
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -123,6 +129,21 @@ class RobotConfig:
 
 
 @dataclass(frozen=True)
+class CalibrationConfig:
+    # OpenVR is Y-up; the scene is Z-up. Keep "y_up_to_z_up" unless you change
+    # the scene convention. "none" disables the world basis change.
+    world_conversion: str = "y_up_to_z_up"
+    # Display-only rotation (roll, pitch, yaw °) aligning the CAD mesh to the
+    # physical tracker. Adjust live in the UI, then paste the value here to make
+    # it the default.
+    model_offset_euler: tuple = (0.0, 0.0, 0.0)
+    # Per-axis sign flip applied to every scene pose (position + orientation),
+    # in case a direction feels inverted on your setup. (1, 1, 1) = no flip;
+    # e.g. (1, 1, -1) would swap Z+/Z-, (1, -1, 1) would swap Y+/Y-.
+    axis_flip: tuple = (1.0, 1.0, 1.0)
+
+
+@dataclass(frozen=True)
 class PlaybackConfig:
     default_speed:   float = 0.25    # metres / second along the waypoint path
     speed_min:       float = 0.02
@@ -139,6 +160,7 @@ class AppConfig:
     buttons:  TrackerButtons  = field(default_factory=TrackerButtons)
     robot:    RobotConfig     = field(default_factory=RobotConfig)
     playback: PlaybackConfig  = field(default_factory=PlaybackConfig)
+    calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
 
     window_title: str = "Robot Point & Play  ·  VIVE Teaching System"
     window_size:  tuple = (1440, 900)

@@ -5,6 +5,7 @@ from .logger import EventLogger, LogEntry
 from .waypoint_manager import WaypointManager
 from .session_manager import SessionManager
 from .playback_engine import PlaybackEngine, PlaybackState
+from .calibration import Calibration, rotation_from_euler_deg
 
 __all__ = [
     "TrackerData", "Waypoint",
@@ -12,4 +13,5 @@ __all__ = [
     "EventLogger", "LogEntry",
     "WaypointManager", "SessionManager",
     "PlaybackEngine", "PlaybackState",
+    "Calibration", "rotation_from_euler_deg",
 ]
