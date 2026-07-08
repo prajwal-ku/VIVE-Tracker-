@@ -6,12 +6,19 @@ pose source. On start it attempts to connect; the connection-status board and
 live-pose panel reflect the true hardware state (nothing shows "OK" unless the
 tracker is really tracking).
 
+Teaching is hardware-driven: Pin 3 (Grip) captures a waypoint and Pin 4 (Trigger)
+plays the taught path — there are no manual capture/play buttons and no robot
+connection panel (robot execution is triggered from the hardware and will be
+wired to the FAIRINO backend when the two machines merge). The window is a
+visualisation console: a large 3D workspace flanked by tracker/calibration/status
+panels and the waypoint table + event log.
+
 Responsibilities (kept thin; the real work lives in the modules):
     • own the shared services (logger, waypoint/session/playback managers)
     • own the VIVE tracker driver and its connection lifecycle
-    • own the robot drivers (serial / FAIRINO) and run programs off-thread
     • drive three timers: render (pose + 3D + playback), hardware buttons, status
     • translate UI intents into calls on the managers, and refresh the views
+    • load optional workspace / tracker CAD into the 3D scene (Scene menu)
 
 The side columns live in scroll areas so a small screen scrolls instead of
 overlapping, while a large monitor lays everything out neatly.
@@ -19,15 +26,14 @@ overlapping, while a large monitor lays everything out neatly.
 
 from __future__ import annotations
 
-import threading
 import time
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
-    QGroupBox, QPushButton, QLabel, QTextEdit, QScrollArea, QFrame,
-    QFileDialog, QMessageBox, QStatusBar, QSizePolicy, QSpinBox, QGridLayout,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
+    QGroupBox, QPushButton, QLabel, QScrollArea, QFrame,
+    QFileDialog, QMessageBox, QStatusBar, QSpinBox, QGridLayout,
 )
 
 from ..config import CONFIG
@@ -36,20 +42,16 @@ from ..core.waypoint_manager import WaypointManager
 from ..core.session_manager import SessionManager
 from ..core.playback_engine import PlaybackEngine, PlaybackState
 from ..tracker import ViveTracker, DeviceState
-from ..robot import BACKENDS
-from ..robot.base import RobotBackend
 from .style import build_stylesheet
 from .viewport import Viewport3D
 from .panels import ConnectionStatusPanel, LivePosePanel, EventLogPanel
 from .waypoint_table import WaypointTable
 from .playback_controls import PlaybackControls
-from .robot_panel import RobotPanel
 
 
 class MainWindow(QMainWindow):
-    # Cross-thread signals (robot worker → GUI thread).
+    # Cross-thread / deferred status messages.
     status_msg = pyqtSignal(str)
-    robot_msg = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -67,10 +69,7 @@ class MainWindow(QMainWindow):
         self._vive = ViveTracker()
         self._tracker_ok = False
         self._reconnects = 0
-
-        # ── robots ──────────────────────────────────────────────
-        self._robots = {b: cls() for b, cls in BACKENDS.items()}
-        self._robot = self._robots[RobotBackend.SERIAL_GCODE]
+        self._reconnect_logged = False
 
         # ── playback bookkeeping ────────────────────────────────
         self._last_frame_t = time.monotonic()
@@ -111,6 +110,20 @@ class MainWindow(QMainWindow):
         act("&Clear Session", self._clear_session)
         act("E&xit", self.close, "Ctrl+Q")
 
+        s = bar.addMenu("Sce&ne")
+
+        def sact(name, slot):
+            a = QAction(name, self)
+            a.triggered.connect(slot)
+            s.addAction(a)
+            return a
+
+        sact("Load &Workspace CAD…", self._load_workspace_cad)
+        sact("&Clear Workspace CAD", self._clear_workspace_cad)
+        s.addSeparator()
+        sact("Load &Tracker CAD…", self._load_tracker_cad)
+        sact("&Reset Tracker CAD (VIVE 3.0)", self._reset_tracker_cad)
+
         h = bar.addMenu("&Help")
         ha = QAction("Controls & Shortcuts", self)
         ha.triggered.connect(self._show_help)
@@ -130,9 +143,9 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._build_center_column())
         splitter.addWidget(self._build_right_column())
         splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(1, 1)   # the 3D workspace takes all extra room
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([348, 700, 484])
+        splitter.setSizes([320, 1160, 420])
 
         self._sb = QStatusBar()
         self.setStatusBar(self._sb)
@@ -163,9 +176,14 @@ class MainWindow(QMainWindow):
         v.addWidget(self.status_panel)
         self.pose_panel = LivePosePanel()
         v.addWidget(self.pose_panel)
-        v.addWidget(self._build_controls_group())
+
+        pin = QLabel("Teaching is hardware-driven:\n"
+                     "Pin 3 (Grip) = Capture waypoint   ·   Pin 4 (Trigger) = Play")
+        pin.setObjectName("hint")
+        pin.setWordWrap(True)
+        v.addWidget(pin)
         v.addStretch()
-        return self._scroll(inner, 348)
+        return self._scroll(inner, 320)
 
     def _build_tracker_group(self) -> QGroupBox:
         g = QGroupBox("VIVE Tracker")
@@ -252,70 +270,22 @@ class MainWindow(QMainWindow):
         v.addLayout(row2)
         return g
 
-    def _build_controls_group(self) -> QGroupBox:
-        g = QGroupBox("Teaching Controls")
-        v = QVBoxLayout(g)
-        v.setSpacing(6)
-
-        self._btn_capture = QPushButton("●  CAPTURE WAYPOINT")
-        self._btn_capture.setObjectName("btn_record")
-        self._btn_capture.setToolTip(
-            "Capture the current tracker pose as a waypoint.  [Space]\n"
-            "Hardware: Pin 3 / Grip (the Point & Play button).")
-        self._btn_capture.clicked.connect(self._capture_waypoint)
-        v.addWidget(self._btn_capture)
-
-        self._btn_teach_play = QPushButton("▶  PLAY PATH")
-        self._btn_teach_play.setObjectName("btn_play")
-        self._btn_teach_play.setToolTip(
-            "Animate a virtual tracker along the waypoint path.  [Enter]\n"
-            "Hardware: Pin 4 / Trigger.")
-        self._btn_teach_play.clicked.connect(self._start_playback)
-        v.addWidget(self._btn_teach_play)
-
-        # Let the wide buttons shrink with the column instead of forcing its width.
-        for b in (self._btn_capture, self._btn_teach_play):
-            b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-
-        row = QHBoxLayout()
-        b_undo = QPushButton("Undo last")
-        b_undo.clicked.connect(self._undo_last)
-        b_clear = QPushButton("Clear all")
-        b_clear.setObjectName("btn_danger")
-        b_clear.clicked.connect(self._clear_session)
-        row.addWidget(b_undo)
-        row.addWidget(b_clear)
-        v.addLayout(row)
-
-        self._pin_hint = QLabel("Pin 3 (Grip) = Capture  •  Pin 4 (Trigger) = Play")
-        self._pin_hint.setObjectName("hint")
-        self._pin_hint.setWordWrap(True)
-        v.addWidget(self._pin_hint)
-        return g
-
     def _build_center_column(self) -> QWidget:
         col = QWidget()
         v = QVBoxLayout(col)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(8)
 
+        # The 3D workspace dominates the window; the playback transport is a
+        # compact strip below it.
         vsplit = QSplitter(Qt.Orientation.Vertical)
-
-        self._tabs = QTabWidget()
         self.viewport = Viewport3D()
-        self._tabs.addTab(self.viewport, "3D Workspace")
-        self._program_view = QTextEdit()
-        self._program_view.setReadOnly(True)
-        self._program_view.setPlaceholderText(
-            "Capture waypoints, then Preview / Send — the robot program appears here.")
-        self._tabs.addTab(self._program_view, "Program Preview")
-        vsplit.addWidget(self._tabs)
-
+        vsplit.addWidget(self.viewport)
         self.playback_controls = PlaybackControls()
         vsplit.addWidget(self.playback_controls)
         vsplit.setStretchFactor(0, 1)
         vsplit.setStretchFactor(1, 0)
-        vsplit.setSizes([560, 210])
+        vsplit.setSizes([760, 190])
         v.addWidget(vsplit)
         return col
 
@@ -326,22 +296,19 @@ class MainWindow(QMainWindow):
         v.setSpacing(8)
 
         self.table = WaypointTable(self.waypoints)
-        self.table.setMinimumHeight(240)
-        self.robot_panel = RobotPanel()
+        self.table.setMinimumHeight(260)
         self.log_panel = EventLogPanel()
         self.log_panel.setMinimumHeight(160)
 
         v.addWidget(self.table, 3)
-        v.addWidget(self.robot_panel, 0)
         v.addWidget(self.log_panel, 2)
-        return self._scroll(inner, 484)
+        return self._scroll(inner, 420)
 
     # ══════════════════════════════════════════════════════════════
     #  Signal wiring
     # ══════════════════════════════════════════════════════════════
     def _wire_signals(self) -> None:
         self.status_msg.connect(self._sb.showMessage)
-        self.robot_msg.connect(self.robot_panel.set_status)
         self.logger.entry_added.connect(self.log_panel.append_entry)
 
         self.table.changed.connect(self._on_waypoints_changed)
@@ -352,18 +319,6 @@ class MainWindow(QMainWindow):
         pc.stop_clicked.connect(self._stop_playback)
         pc.replay_clicked.connect(self._replay)
         pc.speed_changed.connect(self.playback.set_speed)
-
-        rp = self.robot_panel
-        rp.backend_changed.connect(self._on_backend_changed)
-        rp.refresh_ports.connect(self._refresh_ports)
-        rp.connect_clicked.connect(self._connect_robot)
-        rp.disconnect_clicked.connect(self._disconnect_robot)
-        rp.preview_clicked.connect(self._preview_program)
-        rp.send_clicked.connect(self._send_program)
-        rp.export_clicked.connect(self._export_program)
-
-        # Initialise robot panel state for the default backend.
-        self._on_backend_changed(RobotBackend.SERIAL_GCODE)
 
         # Sync the CAD display offset from the calibration defaults.
         self.viewport.set_model_offset(self._vive.calibration.model_R)
@@ -410,19 +365,25 @@ class MainWindow(QMainWindow):
     def _status_tick(self) -> None:
         st = self._vive.get_status()
         self.status_panel.update_status(st)
-        self._tracker_ok = st.tracker == DeviceState.OK
+        now_ok = st.tracker == DeviceState.OK
 
-        if not self._vive.is_connected():
+        # Announce the moment it starts tracking (transition into OK).
+        if now_ok and not self._tracker_ok:
+            self.logger.event("Tracker is tracking — ready to capture")
+            self.status_msg.emit("Tracker tracking — ready (Pin 3 capture, Pin 4 play)")
+        self._tracker_ok = now_ok
+
+        if now_ok:
+            self._reconnect_logged = False
             return
-        # Auto-reconnect the VIVE tracker if the signal drops.
-        if st.tracker in (DeviceState.ERROR, DeviceState.WARN):
-            if self._reconnects < 5:
-                self._reconnects += 1
-                self.logger.warn(
-                    f"Tracker signal issue — reconnecting ({self._reconnects}/5)")
-                self._vive.try_reconnect()
-        else:
-            self._reconnects = 0
+        # Not tracking yet — keep trying to recover, every tick, indefinitely.
+        # try_reconnect() re-opens the SteamVR session if it dropped, else just
+        # re-finds the tracker device. Log only once per outage (no spam).
+        self._vive.try_reconnect()
+        if not self._reconnect_logged:
+            self.logger.warn("Tracker not tracking — waiting for base station + "
+                             "line of sight (auto-retrying)…")
+            self._reconnect_logged = True
 
     # ══════════════════════════════════════════════════════════════
     #  Tracker connection
@@ -563,7 +524,6 @@ class MainWindow(QMainWindow):
         self.table.refresh()
         self._refresh_scene_geometry()
         self.viewport.flash_tracker()
-        self._refresh_program_if_open()
         src = "Pin 3" if from_hardware else "UI"
         self.logger.event(
             f"Waypoint {wp.number} captured  "
@@ -574,94 +534,54 @@ class MainWindow(QMainWindow):
         if self.waypoints.delete_last():
             self.table.refresh()
             self._refresh_scene_geometry()
-            self._refresh_program_if_open()
             self.logger.info("Removed last waypoint")
 
     def _on_waypoints_changed(self) -> None:
         self._refresh_scene_geometry()
-        self._refresh_program_if_open()
 
     # ══════════════════════════════════════════════════════════════
-    #  Robot
+    #  Scene CAD (workspace + tracker model)
     # ══════════════════════════════════════════════════════════════
-    def _on_backend_changed(self, backend: RobotBackend) -> None:
-        self._robot = self._robots[backend]
-        available, reason = self._robot.is_available()
-        self.robot_panel.set_availability(available, reason)
-        self.robot_panel.set_connected(self._robot.is_connected(),
-                                       "Connected" if self._robot.is_connected()
-                                       else "Not connected")
-        if backend == RobotBackend.SERIAL_GCODE:
-            self._refresh_ports()
-        self.logger.info(f"Robot backend: {backend.value}")
+    _CAD_FILTER = "CAD mesh (*.stl *.stp *.step)"
 
-    def _refresh_ports(self) -> None:
-        self.robot_panel.set_ports(self._robot.list_ports())
-
-    def _connect_robot(self) -> None:
-        params = self.robot_panel.params()
-        ok, msg = self._robot.connect(params)
-        self.robot_panel.set_connected(ok, msg)
-        (self.logger.event if ok else self.logger.error)(f"Robot: {msg}")
-        self.status_msg.emit(msg)
-
-    def _disconnect_robot(self) -> None:
-        self._robot.disconnect()
-        self.robot_panel.set_connected(False, "Disconnected")
-        self.logger.info("Robot disconnected")
-
-    def _preview_program(self) -> None:
-        if self.waypoints.count == 0:
-            self._warn("No waypoints to preview")
-            return
-        text = self._robot.preview_program(self.waypoints.waypoints,
-                                            self.robot_panel.params())
-        self._program_view.setPlainText(text)
-        self._tabs.setCurrentIndex(1)
-        self.logger.info("Generated program preview")
-
-    def _refresh_program_if_open(self) -> None:
-        if self._tabs.currentIndex() == 1 and self.waypoints.count:
-            self._program_view.setPlainText(
-                self._robot.preview_program(self.waypoints.waypoints,
-                                            self.robot_panel.params()))
-
-    def _send_program(self) -> None:
-        if not self._robot.is_connected():
-            self._warn("Connect to the robot first")
-            return
-        if self.waypoints.count == 0:
-            self._warn("No waypoints to send")
-            return
-        params = self.robot_panel.params()
-        wps = list(self.waypoints.waypoints)
-        self.logger.event(f"Sending {len(wps)} waypoints to robot…")
-
-        def worker():
-            ok, msg = self._robot.send_program(
-                wps, params,
-                progress=lambda i, t, m: self.robot_msg.emit(m))
-            self.robot_msg.emit(msg)
-            self.status_msg.emit(msg)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _export_program(self) -> None:
-        if self.waypoints.count == 0:
-            self._warn("No waypoints to export")
-            return
-        is_serial = self._robot.backend == RobotBackend.SERIAL_GCODE
-        default = "robot_path.gcode" if is_serial else "fairino_program.py"
-        flt = "G-code (*.gcode *.nc *.txt)" if is_serial else "Python (*.py)"
-        path, _ = QFileDialog.getSaveFileName(self, "Export program", default, flt)
+    def _load_workspace_cad(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load workspace CAD", "", self._CAD_FILTER)
         if not path:
             return
-        text = self._robot.preview_program(self.waypoints.waypoints,
-                                            self.robot_panel.params())
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(text)
-        self.logger.event(f"Program exported → {path}")
-        self.status_msg.emit(f"Program exported → {path}")
+        try:
+            self.viewport.load_workspace_cad(path)
+            self.logger.event(f"Workspace CAD loaded → {path}")
+            self.status_msg.emit(f"Workspace CAD loaded — {path}")
+        except Exception as e:
+            self._warn(f"Workspace CAD load failed: {e}")
+            self.logger.error(f"Workspace CAD load failed: {e}")
+
+    def _clear_workspace_cad(self) -> None:
+        self.viewport.clear_workspace_cad()
+        self.logger.info("Workspace CAD cleared")
+        self.status_msg.emit("Workspace CAD cleared")
+
+    def _load_tracker_cad(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load tracker CAD (replaces the VIVE model)", "",
+            self._CAD_FILTER)
+        if not path:
+            return
+        try:
+            self.viewport.load_tracker_cad(path)
+            self.viewport.set_model_offset(self._vive.calibration.model_R)
+            self.logger.event(f"Tracker CAD replaced → {path}")
+            self.status_msg.emit(f"Tracker CAD replaced — {path}")
+        except Exception as e:
+            self._warn(f"Tracker CAD load failed: {e}")
+            self.logger.error(f"Tracker CAD load failed: {e}")
+
+    def _reset_tracker_cad(self) -> None:
+        self.viewport.reset_tracker_cad()
+        self.viewport.set_model_offset(self._vive.calibration.model_R)
+        self.logger.info("Tracker CAD reset to VIVE Tracker 3.0")
+        self.status_msg.emit("Tracker CAD reset to VIVE Tracker 3.0")
 
     # ══════════════════════════════════════════════════════════════
     #  Session
@@ -682,7 +602,6 @@ class MainWindow(QMainWindow):
         self.viewport.update_trail(self.waypoints.trail_array())
         self.viewport.set_ghost(None)
         self.viewport.set_highlight(None)
-        self._program_view.clear()
         self.logger.info("Session cleared")
         self.status_msg.emit("Session cleared")
 
@@ -772,8 +691,5 @@ class MainWindow(QMainWindow):
                 t.stop()
         if self._vive.is_connected():
             self._vive.disconnect()
-        for robot in self._robots.values():
-            if robot.is_connected():
-                robot.disconnect()
         self.logger.info("Application closing")
         ev.accept()

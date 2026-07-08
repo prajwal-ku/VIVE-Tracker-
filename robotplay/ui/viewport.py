@@ -23,6 +23,7 @@ from PyQt6.QtCore import QTimer
 from ..config import CONFIG
 from ..core.models import TrackerData
 from .tracker_model import TrackerModel
+from .mesh_loader import load_mesh
 
 
 class Viewport3D(gl.GLViewWidget):
@@ -37,6 +38,7 @@ class Viewport3D(gl.GLViewWidget):
 
         self._label_items: list[gl.GLTextItem] = []
         self._model_offset = np.eye(3)   # display-only CAD alignment (calibration)
+        self._workspace_item = None      # optional loaded environment CAD
 
         self._build_static_scene()
         self._build_dynamic_items()
@@ -190,3 +192,45 @@ class Viewport3D(gl.GLViewWidget):
     def flash_tracker(self) -> None:
         """Brief gold flash of the tracker model when a waypoint is captured."""
         self._model.flash()
+
+    # ── loadable CAD ────────────────────────────────────────────
+    def load_tracker_cad(self, path: str) -> None:
+        """Replace the live tracker model with a user-supplied CAD (.stl/.stp)."""
+        self._model.remove()
+        self._model = TrackerModel(self, body=(0.82, 0.86, 0.94, 1.0),
+                                   mesh_path=path)
+
+    def reset_tracker_cad(self) -> None:
+        """Restore the default bundled VIVE Tracker 3.0 model."""
+        self._model.remove()
+        self._model = TrackerModel(self, body=(0.82, 0.86, 0.94, 1.0))
+
+    def load_workspace_cad(self, path: str) -> None:
+        """Load a static environment/workspace CAD and place it on the ground.
+
+        Auto-detects millimetre CAD (rescales to metres), centres it on the grid
+        and rests its base at z=0."""
+        verts, faces = load_mesh(path)
+        size = float((verts.max(axis=0) - verts.min(axis=0)).max())
+        if size > 10.0:                       # looks like millimetres → metres
+            verts = verts * 0.001
+        mn = verts.min(axis=0)
+        mx = verts.max(axis=0)
+        verts[:, 0] -= (mn[0] + mx[0]) / 2.0  # centre X
+        verts[:, 1] -= (mn[1] + mx[1]) / 2.0  # centre Y
+        verts[:, 2] -= mn[2]                  # rest base on the ground
+
+        self.clear_workspace_cad()
+        md = gl.MeshData(vertexes=verts, faces=faces)
+        self._workspace_item = gl.GLMeshItem(
+            meshdata=md, color=(0.45, 0.48, 0.56, 1.0), shader="shaded",
+            smooth=True, drawEdges=False, glOptions="opaque")
+        self.addItem(self._workspace_item)
+
+        extent = float((verts.max(axis=0) - verts.min(axis=0)).max())
+        self.setCameraPosition(distance=max(1.5, extent * 1.4))
+
+    def clear_workspace_cad(self) -> None:
+        if self._workspace_item is not None:
+            self.removeItem(self._workspace_item)
+            self._workspace_item = None

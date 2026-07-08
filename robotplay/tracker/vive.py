@@ -51,7 +51,9 @@ class ViveTracker(TrackerInterface):
         self.calibration = Calibration(
             world_conversion=CONFIG.calibration.world_conversion,
             model_offset_euler=CONFIG.calibration.model_offset_euler,
-            axis_flip=CONFIG.calibration.axis_flip)
+            axis_flip_orientation=CONFIG.calibration.axis_flip_orientation,
+            axis_flip_position=CONFIG.calibration.axis_flip_position,
+            orientation_invert_euler=CONFIG.calibration.orientation_invert_euler)
         self._raw_pos = np.zeros(3)
         self._raw_R = np.eye(3)
 
@@ -108,11 +110,20 @@ class ViveTracker(TrackerInterface):
 
     def _find_tracker(self) -> None:
         import openvr
-        # Prefer a GenericTracker; fall back to a Controller used as a pen.
-        for cls in (openvr.TrackedDeviceClass_GenericTracker,
-                    openvr.TrackedDeviceClass_Controller):
-            for i in range(openvr.k_unMaxTrackedDeviceCount):
-                if self._vr.getTrackedDeviceClass(i) == cls:
+        poses = self._vr.getDeviceToAbsoluteTrackingPose(
+            openvr.TrackingUniverseStanding, 0, openvr.k_unMaxTrackedDeviceCount)
+        classes = (openvr.TrackedDeviceClass_GenericTracker,
+                   openvr.TrackedDeviceClass_Controller)
+        # First pass: prefer a device that is actually CONNECTED (avoids latching
+        # onto a stale/phantom tracker slot SteamVR still lists). Second pass:
+        # accept any matching device so we at least have an index to poll.
+        for require_connected in (True, False):
+            for cls in classes:
+                for i in range(openvr.k_unMaxTrackedDeviceCount):
+                    if self._vr.getTrackedDeviceClass(i) != cls:
+                        continue
+                    if require_connected and not poses[i].bDeviceIsConnected:
+                        continue
                     self._tracker_index = i
                     return
         self._tracker_index = None

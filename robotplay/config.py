@@ -137,10 +137,20 @@ class CalibrationConfig:
     # physical tracker. Adjust live in the UI, then paste the value here to make
     # it the default.
     model_offset_euler: tuple = (0.0, 0.0, 0.0)
-    # Per-axis sign flip applied to every scene pose (position + orientation),
-    # in case a direction feels inverted on your setup. (1, 1, 1) = no flip;
-    # e.g. (1, 1, -1) would swap Z+/Z-, (1, -1, 1) would swap Y+/Y-.
-    axis_flip: tuple = (1.0, 1.0, 1.0)
+    # ── Fine-tuning knobs (leave at neutral unless a direction is confirmed
+    #    wrong on hardware; stacking these fights the clean transform) ──────────
+    # Movement direction per axis. (1, 1, 1) = no flip; e.g. (1, -1, 1) swaps Y.
+    axis_flip_position: tuple = (1.0, 1.0, 1.0)
+    # Orientation basis flip, applied as the similarity transform Fo·R·Fo.
+    # Leave neutral — the locked orientation is now computed in room space and
+    # mapped through the same Y-up→Z-up basis as position, so the model already
+    # mirrors the physical tracker on every axis. Only touch this if a single
+    # axis is confirmed inverted on hardware, and only with an EVEN number of
+    # -1s (det=+1, a proper rotation) so combined rotations aren't distorted.
+    axis_flip_orientation: tuple = (1.0, 1.0, 1.0)
+    # Per-Euler-angle negate — a band-aid that DISTORTS combined rotations. Keep
+    # neutral; use axis_flip_orientation (a proper basis change) instead.
+    orientation_invert_euler: tuple = (1.0, 1.0, 1.0)
 
 
 @dataclass(frozen=True)

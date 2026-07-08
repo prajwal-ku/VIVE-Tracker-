@@ -19,14 +19,13 @@ single matrix multiply per part — cheap enough for 60 Hz.
 
 from __future__ import annotations
 
-import struct
-
 import numpy as np
 import pyqtgraph.opengl as gl
 from pyqtgraph import Transform3D
 from pyqtgraph.opengl.shaders import ShaderProgram, VertexShader, FragmentShader
 
 from ..config import CONFIG
+from .mesh_loader import load_mesh
 
 
 # A brighter version of pyqtgraph 0.14's modern "shaded" shader (same
@@ -64,40 +63,6 @@ _BRIGHT_SHADER = ShaderProgram("brightShaded", [
 ])
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Minimal STL loader (binary + ASCII) → (vertices Nx3, faces Mx3)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def load_stl(path: str) -> tuple[np.ndarray, np.ndarray]:
-    with open(path, "rb") as f:
-        data = f.read()
-    header = data[:5].lower()
-    if header == b"solid" and b"facet" in data[:2000]:
-        return _load_ascii_stl(data.decode("ascii", "ignore"))
-    return _load_binary_stl(data)
-
-
-def _load_binary_stl(data: bytes) -> tuple[np.ndarray, np.ndarray]:
-    n = struct.unpack("<I", data[80:84])[0]
-    tri = np.dtype([("n", "<3f4"), ("v", "<3f4", (3,)), ("attr", "<u2")])
-    tris = np.frombuffer(data, dtype=tri, count=n, offset=84)
-    verts = tris["v"].reshape(-1, 3).astype(float)
-    faces = np.arange(len(verts)).reshape(-1, 3)
-    return verts, faces
-
-
-def _load_ascii_stl(text: str) -> tuple[np.ndarray, np.ndarray]:
-    verts = []
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("vertex"):
-            _, x, y, z = line.split()[:4]
-            verts.append((float(x), float(y), float(z)))
-    verts = np.array(verts, dtype=float)
-    faces = np.arange(len(verts)).reshape(-1, 3)
-    return verts, faces
-
-
 def _fit_mesh(verts: np.ndarray, target: float) -> np.ndarray:
     """Recentre to the origin and scale so the largest extent equals `target`."""
     centre = (verts.max(axis=0) + verts.min(axis=0)) / 2.0
@@ -116,25 +81,33 @@ class TrackerModel:
     def __init__(self, view: gl.GLViewWidget,
                  body=(0.80, 0.84, 0.92, 1.0),
                  accent=(0.20, 1.00, 0.45, 1.0),
-                 ghost: bool = False):
+                 ghost: bool = False,
+                 mesh_path: str | None = None):
         self._view = view
         self._ghost = ghost
         self._parts: list[tuple[gl.GLGraphicsItem, Transform3D]] = []
         self._body_items: list[gl.GLMeshItem] = []
         self._body_color = body
 
-        # Prefer an explicit STL from config, else the bundled real VIVE Tracker
-        # CAD (converted from the official STEP), else the procedural fallback.
-        stl = CONFIG.scene.tracker_stl_path or self._bundled_asset()
-        if stl:
+        # Priority: an explicit mesh (user "Load Tracker CAD"), else the config
+        # override, else the bundled real VIVE Tracker 3.0 CAD, else procedural.
+        source = mesh_path or CONFIG.scene.tracker_stl_path or self._bundled_asset()
+        if source:
             try:
-                self._build_from_stl(stl, body)
+                self._build_from_mesh(source, body)
             except Exception:
                 self._build_procedural(body, accent)
         else:
             self._build_procedural(body, accent)
 
         self.set_visible(not ghost)  # ghost starts hidden
+
+    def remove(self) -> None:
+        """Remove every mesh item of this model from the view."""
+        for item, _ in self._parts:
+            self._view.removeItem(item)
+        self._parts.clear()
+        self._body_items.clear()
 
     @staticmethod
     def _bundled_asset() -> str:
@@ -202,8 +175,8 @@ class TrackerModel:
                   self._xform(tx=r_top * 0.9, tz=h * 0.35))
 
     # ── STL-based model ─────────────────────────────────────────
-    def _build_from_stl(self, path: str, color) -> None:
-        verts, faces = load_stl(path)
+    def _build_from_mesh(self, path: str, color) -> None:
+        verts, faces = load_mesh(path)
         verts = _fit_mesh(verts, CONFIG.scene.tracker_model_size)
         md = gl.MeshData(vertexes=verts, faces=faces)
         self._add(md, color, Transform3D(), is_body=True)

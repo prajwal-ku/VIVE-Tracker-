@@ -38,8 +38,14 @@ KUKA/UR style).
   adjustable speed.
 - **Professional waypoint table** — number, timestamp, X/Y/Z, roll/pitch/yaw,
   with rename, delete, reorder and CSV/JSON export.
-- **Robot abstraction with two swappable backends** — G-code/serial (works now)
-  and FAIRINO TCP/IP (ready for `FAIRINO_SimMachine_v3.8.7`).
+- **Hardware-driven teaching** — Pin 3 captures, Pin 4 plays. No manual
+  capture/play buttons and no robot-connection panel clutter the UI; the window
+  is a big 3D visualisation console. (The robot abstraction — G-code/serial and
+  FAIRINO TCP/IP — stays in the codebase, ready to be triggered from hardware
+  when the tracker rig and `FAIRINO_SimMachine_v3.8.7` merge.)
+- **Loadable CAD** — drop a **workspace CAD** into the scene (a robot cell,
+  table, fixture) and **swap the tracker CAD** for any model, via the *Scene*
+  menu. STL and STEP (`.stp`) are both supported.
 - **Connection-status board, live-pose panel, timestamped event log**, dark
   industrial theme.
 
@@ -76,10 +82,10 @@ python main.py
 4. Press **Pin 3 / Grip** (the physical Point & Play button) to capture a
    waypoint. Each capture adds a gold sphere + label and a table row; a white
    straight-segment path connects the waypoints.
-5. Press **Pin 4 / Trigger** to play the taught path (a virtual tracker animates
+5. Press **Pin 4 / Trigger** to play the taught path (the tracker model animates
    along it). Space / Enter on the keyboard do the same, for convenience.
-6. Pick a robot backend on the right, **Preview** the program, then **Export** or
-   (with a real connection) **Send to Robot**.
+6. Review the taught path with the **Playback** transport, and manage waypoints
+   in the table (rename / reorder / delete) or export via the **Session** menu.
 
 > No tracker handy? You can still explore the UI and playback by loading demo
 > data with **Session ▸ Load** on `examples/sample_session.json` — but live
@@ -117,21 +123,29 @@ Button presses are edge-detected and debounced (one click = one action).
 
 ---
 
-## Connecting to the FAIRINO robot
+## Loading CAD into the scene
 
-Your VIVE tracker rig and `FAIRINO_SimMachine_v3.8.7` currently live on separate
-laptops; this app is built to merge cleanly with the robot side later:
+Use the **Scene** menu:
 
-- Select **Backend ▸ FAIRINO (TCP/IP)** in the *Robot* panel.
-- Set the controller/simulator **IP** (default `192.168.58.2`), velocity, tool
-  and workpiece.
-- Each captured waypoint becomes a `robot.MoveL([x,y,z,rx,ry,rz], tool, user, vel)`
-  call via the `fairino` Python SDK. Use **Preview** to see the full program.
-- On the robot laptop (where the `fairino` SDK is installed), **Connect** then
-  **Send to Robot** executes the path.
+- **Load Workspace CAD…** — place a static environment model (robot cell, table,
+  fixture) in the 3D scene. It is auto-scaled (millimetre CAD → metres), centred
+  on the grid and rested on the ground. **Clear Workspace CAD** removes it.
+- **Load Tracker CAD…** — replace the on-screen tracker with any model. **Reset
+  Tracker CAD (VIVE 3.0)** restores the bundled default.
 
-The **Serial / G-code (COM)** backend works today with GRBL/Marlin-style
-controllers: one `G1` linear move per waypoint over the selected COM port.
+Both accept **STL** and **STEP** (`.stp` / `.step`). STEP is tessellated on load
+with `gmsh` (install it with `pip install gmsh`); STL needs no extra dependency.
+
+## Robot execution (hardware-driven)
+
+Teaching and playback are driven entirely by the tracker's hardware buttons
+(Pin 3 = capture, Pin 4 = play), so the UI has **no manual robot-connection
+panel**. The robot abstraction still lives in the codebase — `SerialGCodeRobot`
+(one `G1` linear move per waypoint over a COM port) and `FairinoRobot`
+(`MoveL([x,y,z,rx,ry,rz], tool, user, vel)` over TCP/IP) — ready to be triggered
+from the hardware path when the VIVE rig and `FAIRINO_SimMachine_v3.8.7` are
+merged onto one machine. Waypoints can still be exported (Session ▸ Export) for
+offline use.
 
 ---
 
@@ -185,19 +199,18 @@ robotplay/
 ├── tracker/
 │   ├── base.py              TrackerInterface (abstraction) + status types
 │   └── vive.py              ViveTracker (SteamVR/OpenVR, buttons, reconnect)
-├── robot/
+├── robot/                   retained for the FAIRINO merge (no UI panel now)
 │   ├── base.py              RobotInterface (abstraction) + ConnectionParams
 │   ├── serial_gcode.py      SerialGCodeRobot (G-code over COM)
 │   └── fairino.py           FairinoRobot (MoveL over TCP/IP)
 ├── ui/
 │   ├── style.py             dark industrial QSS
-│   ├── viewport.py          Viewport3D (grid, axes, tracker, trail, path, …)
-│   ├── tracker_model.py     VIVE Tracker CAD model (STL loader + bright shader,
-│   │                        procedural fallback)
+│   ├── viewport.py          Viewport3D (grid, axes, tracker, trail, path, CAD)
+│   ├── tracker_model.py     tracker CAD model (bright shader, procedural fallback)
+│   ├── mesh_loader.py       STL + STEP(.stp) → mesh loader (STEP via gmsh)
 │   ├── panels.py            ConnectionStatus / LivePose / EventLog panels
 │   ├── waypoint_table.py    editable waypoint grid
 │   ├── playback_controls.py transport bar + progress + read-out
-│   ├── robot_panel.py       backend selector + connection + actions
 │   └── main_window.py       wires all modules, owns the timers
 └── assets/
     └── vive_tracker.stl     bundled real VIVE Tracker 3.0 mesh (from STEP)
